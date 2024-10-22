@@ -1,0 +1,604 @@
+--[[
+ .____                  ________ ___.    _____                           __                
+ |    |    __ _______   \_____  \\_ |___/ ____\_ __  ______ ____ _____ _/  |_  ___________ 
+ |    |   |  |  \__  \   /   |   \| __ \   __\  |  \/  ___// ___\\__  \\   __\/  _ \_  __ \
+ |    |___|  |  // __ \_/    |    \ \_\ \  | |  |  /\___ \\  \___ / __ \|  | (  <_> )  | \/
+ |_______ \____/(____  /\_______  /___  /__| |____//____  >\___  >____  /__|  \____/|__|   
+         \/          \/         \/    \/                \/     \/     \/                   
+          \_Welcome to LuaObfuscator.com   (Alpha 0.10.8) ~  Much Love, Ferib 
+
+]]--
+
+local StrToNumber = tonumber;
+local Byte = string.byte;
+local Char = string.char;
+local Sub = string.sub;
+local Subg = string.gsub;
+local Rep = string.rep;
+local Concat = table.concat;
+local Insert = table.insert;
+local LDExp = math.ldexp;
+local GetFEnv = getfenv or function()
+	return _ENV;
+end;
+local Setmetatable = setmetatable;
+local PCall = pcall;
+local Select = select;
+local Unpack = unpack or table.unpack;
+local ToNumber = tonumber;
+local function VMCall(ByteString, vmenv, ...)
+	local DIP = 1;
+	local repeatNext;
+	ByteString = Subg(Sub(ByteString, 5), "..", function(byte)
+		if (Byte(byte, 2) == 81) then
+			repeatNext = StrToNumber(Sub(byte, 1, 1));
+			return "";
+		else
+			local a = Char(StrToNumber(byte, 16));
+			if repeatNext then
+				local b = Rep(a, repeatNext);
+				repeatNext = nil;
+				return b;
+			else
+				return a;
+			end
+		end
+	end);
+	local function gBit(Bit, Start, End)
+		if End then
+			local Res = (Bit / (2 ^ (Start - 1))) % (2 ^ (((End - 1) - (Start - 1)) + 1));
+			return Res - (Res % 1);
+		else
+			local Plc = 2 ^ (Start - 1);
+			return (((Bit % (Plc + Plc)) >= Plc) and 1) or 0;
+		end
+	end
+	local function gBits8()
+		local a = Byte(ByteString, DIP, DIP);
+		DIP = DIP + 1;
+		return a;
+	end
+	local function gBits16()
+		local a, b = Byte(ByteString, DIP, DIP + 2);
+		DIP = DIP + 2;
+		return (b * 256) + a;
+	end
+	local function gBits32()
+		local a, b, c, d = Byte(ByteString, DIP, DIP + 3);
+		DIP = DIP + 4;
+		return (d * 16777216) + (c * 65536) + (b * 256) + a;
+	end
+	local function gFloat()
+		local Left = gBits32();
+		local Right = gBits32();
+		local IsNormal = 1;
+		local Mantissa = (gBit(Right, 1, 20) * (2 ^ 32)) + Left;
+		local Exponent = gBit(Right, 21, 31);
+		local Sign = ((gBit(Right, 32) == 1) and -1) or 1;
+		if (Exponent == 0) then
+			if (Mantissa == 0) then
+				return Sign * 0;
+			else
+				Exponent = 1;
+				IsNormal = 0;
+			end
+		elseif (Exponent == 2047) then
+			return ((Mantissa == 0) and (Sign * (1 / 0))) or (Sign * NaN);
+		end
+		return LDExp(Sign, Exponent - 1023) * (IsNormal + (Mantissa / (2 ^ 52)));
+	end
+	local function gString(Len)
+		local Str;
+		if not Len then
+			Len = gBits32();
+			if (Len == 0) then
+				return "";
+			end
+		end
+		Str = Sub(ByteString, DIP, (DIP + Len) - 1);
+		DIP = DIP + Len;
+		local FStr = {};
+		for Idx = 1, #Str do
+			FStr[Idx] = Char(Byte(Sub(Str, Idx, Idx)));
+		end
+		return Concat(FStr);
+	end
+	local gInt = gBits32;
+	local function _R(...)
+		return {...}, Select("#", ...);
+	end
+	local function Deserialize()
+		local Instrs = {};
+		local Functions = {};
+		local Lines = {};
+		local Chunk = {Instrs,Functions,nil,Lines};
+		local ConstCount = gBits32();
+		local Consts = {};
+		for Idx = 1, ConstCount do
+			local Type = gBits8();
+			local Cons;
+			if (Type == 1) then
+				Cons = gBits8() ~= 0;
+			elseif (Type == 2) then
+				Cons = gFloat();
+			elseif (Type == 3) then
+				Cons = gString();
+			end
+			Consts[Idx] = Cons;
+		end
+		Chunk[3] = gBits8();
+		for Idx = 1, gBits32() do
+			local Descriptor = gBits8();
+			if (gBit(Descriptor, 1, 1) == 0) then
+				local Type = gBit(Descriptor, 2, 3);
+				local Mask = gBit(Descriptor, 4, 6);
+				local Inst = {gBits16(),gBits16(),nil,nil};
+				if (Type == 0) then
+					Inst[3] = gBits16();
+					Inst[4] = gBits16();
+				elseif (Type == 1) then
+					Inst[3] = gBits32();
+				elseif (Type == 2) then
+					Inst[3] = gBits32() - (2 ^ 16);
+				elseif (Type == 3) then
+					Inst[3] = gBits32() - (2 ^ 16);
+					Inst[4] = gBits16();
+				end
+				if (gBit(Mask, 1, 1) == 1) then
+					Inst[2] = Consts[Inst[2]];
+				end
+				if (gBit(Mask, 2, 2) == 1) then
+					Inst[3] = Consts[Inst[3]];
+				end
+				if (gBit(Mask, 3, 3) == 1) then
+					Inst[4] = Consts[Inst[4]];
+				end
+				Instrs[Idx] = Inst;
+			end
+		end
+		for Idx = 1, gBits32() do
+			Functions[Idx - 1] = Deserialize();
+		end
+		return Chunk;
+	end
+	local function Wrap(Chunk, Upvalues, Env)
+		local Instr = Chunk[1];
+		local Proto = Chunk[2];
+		local Params = Chunk[3];
+		return function(...)
+			local Instr = Instr;
+			local Proto = Proto;
+			local Params = Params;
+			local _R = _R;
+			local VIP = 1;
+			local Top = -1;
+			local Vararg = {};
+			local Args = {...};
+			local PCount = Select("#", ...) - 1;
+			local Lupvals = {};
+			local Stk = {};
+			for Idx = 0, PCount do
+				if (Idx >= Params) then
+					Vararg[Idx - Params] = Args[Idx + 1];
+				else
+					Stk[Idx] = Args[Idx + 1];
+				end
+			end
+			local Varargsz = (PCount - Params) + 1;
+			local Inst;
+			local Enum;
+			while true do
+				Inst = Instr[VIP];
+				Enum = Inst[1];
+				if (Enum <= 38) then
+					if (Enum <= 18) then
+						if (Enum <= 8) then
+							if (Enum <= 3) then
+								if (Enum <= 1) then
+									if (Enum == 0) then
+										local A = Inst[2];
+										Stk[A](Unpack(Stk, A + 1, Inst[3]));
+									else
+										local A = Inst[2];
+										Stk[A] = Stk[A]();
+									end
+								elseif (Enum == 2) then
+									Stk[Inst[2]] = Inst[3] + Stk[Inst[4]];
+								else
+									Stk[Inst[2]][Inst[3]] = Stk[Inst[4]];
+								end
+							elseif (Enum <= 5) then
+								if (Enum > 4) then
+									Stk[Inst[2]] = Env[Inst[3]];
+								else
+									Stk[Inst[2]] = Inst[3] ~= 0;
+								end
+							elseif (Enum <= 6) then
+								if Stk[Inst[2]] then
+									VIP = VIP + 1;
+								else
+									VIP = Inst[3];
+								end
+							elseif (Enum == 7) then
+								do
+									return;
+								end
+							else
+								Stk[Inst[2]] = not Stk[Inst[3]];
+							end
+						elseif (Enum <= 13) then
+							if (Enum <= 10) then
+								if (Enum == 9) then
+									Stk[Inst[2]] = Stk[Inst[3]] % Stk[Inst[4]];
+								else
+									Stk[Inst[2]] = Wrap(Proto[Inst[3]], nil, Env);
+								end
+							elseif (Enum <= 11) then
+								local A = Inst[2];
+								do
+									return Unpack(Stk, A, Top);
+								end
+							elseif (Enum > 12) then
+								if (Stk[Inst[2]] == Stk[Inst[4]]) then
+									VIP = VIP + 1;
+								else
+									VIP = Inst[3];
+								end
+							else
+								local A = Inst[2];
+								Stk[A] = Stk[A](Unpack(Stk, A + 1, Top));
+							end
+						elseif (Enum <= 15) then
+							if (Enum == 14) then
+								local A = Inst[2];
+								local Results, Limit = _R(Stk[A](Unpack(Stk, A + 1, Top)));
+								Top = (Limit + A) - 1;
+								local Edx = 0;
+								for Idx = A, Top do
+									Edx = Edx + 1;
+									Stk[Idx] = Results[Edx];
+								end
+							else
+								local A = Inst[2];
+								local Results, Limit = _R(Stk[A](Stk[A + 1]));
+								Top = (Limit + A) - 1;
+								local Edx = 0;
+								for Idx = A, Top do
+									Edx = Edx + 1;
+									Stk[Idx] = Results[Edx];
+								end
+							end
+						elseif (Enum <= 16) then
+							Stk[Inst[2]][Inst[3]] = Stk[Inst[4]];
+						elseif (Enum == 17) then
+							Stk[Inst[2]] = {};
+						elseif (Stk[Inst[2]] == Stk[Inst[4]]) then
+							VIP = VIP + 1;
+						else
+							VIP = Inst[3];
+						end
+					elseif (Enum <= 28) then
+						if (Enum <= 23) then
+							if (Enum <= 20) then
+								if (Enum == 19) then
+									Stk[Inst[2]] = Env[Inst[3]];
+								elseif not Stk[Inst[2]] then
+									VIP = VIP + 1;
+								else
+									VIP = Inst[3];
+								end
+							elseif (Enum <= 21) then
+								Stk[Inst[2]][Inst[3]] = Inst[4];
+							elseif (Enum == 22) then
+								Stk[Inst[2]] = Stk[Inst[3]] + Inst[4];
+							else
+								Stk[Inst[2]] = Upvalues[Inst[3]];
+							end
+						elseif (Enum <= 25) then
+							if (Enum > 24) then
+								Stk[Inst[2]] = Stk[Inst[3]] % Inst[4];
+							else
+								Stk[Inst[2]] = Inst[3] + Stk[Inst[4]];
+							end
+						elseif (Enum <= 26) then
+							local A = Inst[2];
+							local Step = Stk[A + 2];
+							local Index = Stk[A] + Step;
+							Stk[A] = Index;
+							if (Step > 0) then
+								if (Index <= Stk[A + 1]) then
+									VIP = Inst[3];
+									Stk[A + 3] = Index;
+								end
+							elseif (Index >= Stk[A + 1]) then
+								VIP = Inst[3];
+								Stk[A + 3] = Index;
+							end
+						elseif (Enum == 27) then
+							local A = Inst[2];
+							Stk[A](Unpack(Stk, A + 1, Top));
+						else
+							Stk[Inst[2]] = Stk[Inst[3]] % Stk[Inst[4]];
+						end
+					elseif (Enum <= 33) then
+						if (Enum <= 30) then
+							if (Enum == 29) then
+								Stk[Inst[2]] = Inst[3];
+							else
+								VIP = Inst[3];
+							end
+						elseif (Enum <= 31) then
+							Stk[Inst[2]] = Wrap(Proto[Inst[3]], nil, Env);
+						elseif (Enum == 32) then
+							if not Stk[Inst[2]] then
+								VIP = VIP + 1;
+							else
+								VIP = Inst[3];
+							end
+						else
+							Stk[Inst[2]][Inst[3]] = Inst[4];
+						end
+					elseif (Enum <= 35) then
+						if (Enum == 34) then
+							local NewProto = Proto[Inst[3]];
+							local NewUvals;
+							local Indexes = {};
+							NewUvals = Setmetatable({}, {__index=function(_, Key)
+								local Val = Indexes[Key];
+								return Val[1][Val[2]];
+							end,__newindex=function(_, Key, Value)
+								local Val = Indexes[Key];
+								Val[1][Val[2]] = Value;
+							end});
+							for Idx = 1, Inst[4] do
+								VIP = VIP + 1;
+								local Mvm = Instr[VIP];
+								if (Mvm[1] == 36) then
+									Indexes[Idx - 1] = {Stk,Mvm[3]};
+								else
+									Indexes[Idx - 1] = {Upvalues,Mvm[3]};
+								end
+								Lupvals[#Lupvals + 1] = Indexes;
+							end
+							Stk[Inst[2]] = Wrap(NewProto, NewUvals, Env);
+						else
+							Stk[Inst[2]] = #Stk[Inst[3]];
+						end
+					elseif (Enum <= 36) then
+						Stk[Inst[2]] = Stk[Inst[3]];
+					elseif (Enum > 37) then
+						local A = Inst[2];
+						local Results, Limit = _R(Stk[A](Unpack(Stk, A + 1, Top)));
+						Top = (Limit + A) - 1;
+						local Edx = 0;
+						for Idx = A, Top do
+							Edx = Edx + 1;
+							Stk[Idx] = Results[Edx];
+						end
+					else
+						local A = Inst[2];
+						local B = Stk[Inst[3]];
+						Stk[A + 1] = B;
+						Stk[A] = B[Inst[4]];
+					end
+				elseif (Enum <= 57) then
+					if (Enum <= 47) then
+						if (Enum <= 42) then
+							if (Enum <= 40) then
+								if (Enum > 39) then
+									local A = Inst[2];
+									local Results, Limit = _R(Stk[A](Stk[A + 1]));
+									Top = (Limit + A) - 1;
+									local Edx = 0;
+									for Idx = A, Top do
+										Edx = Edx + 1;
+										Stk[Idx] = Results[Edx];
+									end
+								elseif Stk[Inst[2]] then
+									VIP = VIP + 1;
+								else
+									VIP = Inst[3];
+								end
+							elseif (Enum == 41) then
+								local A = Inst[2];
+								Stk[A] = Stk[A]();
+							else
+								Stk[Inst[2]] = {};
+							end
+						elseif (Enum <= 44) then
+							if (Enum == 43) then
+								local A = Inst[2];
+								local Step = Stk[A + 2];
+								local Index = Stk[A] + Step;
+								Stk[A] = Index;
+								if (Step > 0) then
+									if (Index <= Stk[A + 1]) then
+										VIP = Inst[3];
+										Stk[A + 3] = Index;
+									end
+								elseif (Index >= Stk[A + 1]) then
+									VIP = Inst[3];
+									Stk[A + 3] = Index;
+								end
+							else
+								local A = Inst[2];
+								local Index = Stk[A];
+								local Step = Stk[A + 2];
+								if (Step > 0) then
+									if (Index > Stk[A + 1]) then
+										VIP = Inst[3];
+									else
+										Stk[A + 3] = Index;
+									end
+								elseif (Index < Stk[A + 1]) then
+									VIP = Inst[3];
+								else
+									Stk[A + 3] = Index;
+								end
+							end
+						elseif (Enum <= 45) then
+							local A = Inst[2];
+							Stk[A] = Stk[A](Stk[A + 1]);
+						elseif (Enum == 46) then
+							local NewProto = Proto[Inst[3]];
+							local NewUvals;
+							local Indexes = {};
+							NewUvals = Setmetatable({}, {__index=function(_, Key)
+								local Val = Indexes[Key];
+								return Val[1][Val[2]];
+							end,__newindex=function(_, Key, Value)
+								local Val = Indexes[Key];
+								Val[1][Val[2]] = Value;
+							end});
+							for Idx = 1, Inst[4] do
+								VIP = VIP + 1;
+								local Mvm = Instr[VIP];
+								if (Mvm[1] == 36) then
+									Indexes[Idx - 1] = {Stk,Mvm[3]};
+								else
+									Indexes[Idx - 1] = {Upvalues,Mvm[3]};
+								end
+								Lupvals[#Lupvals + 1] = Indexes;
+							end
+							Stk[Inst[2]] = Wrap(NewProto, NewUvals, Env);
+						else
+							local A = Inst[2];
+							Stk[A](Stk[A + 1]);
+						end
+					elseif (Enum <= 52) then
+						if (Enum <= 49) then
+							if (Enum == 48) then
+								Stk[Inst[2]] = Inst[3] ~= 0;
+							else
+								Stk[Inst[2]] = Stk[Inst[3]] + Inst[4];
+							end
+						elseif (Enum <= 50) then
+							local A = Inst[2];
+							do
+								return Unpack(Stk, A, Top);
+							end
+						elseif (Enum > 51) then
+							local A = Inst[2];
+							local Results, Limit = _R(Stk[A](Unpack(Stk, A + 1, Inst[3])));
+							Top = (Limit + A) - 1;
+							local Edx = 0;
+							for Idx = A, Top do
+								Edx = Edx + 1;
+								Stk[Idx] = Results[Edx];
+							end
+						else
+							local A = Inst[2];
+							do
+								return Stk[A](Unpack(Stk, A + 1, Inst[3]));
+							end
+						end
+					elseif (Enum <= 54) then
+						if (Enum > 53) then
+							Stk[Inst[2]] = Stk[Inst[3]] % Inst[4];
+						else
+							local A = Inst[2];
+							Stk[A](Stk[A + 1]);
+						end
+					elseif (Enum <= 55) then
+						local A = Inst[2];
+						local Index = Stk[A];
+						local Step = Stk[A + 2];
+						if (Step > 0) then
+							if (Index > Stk[A + 1]) then
+								VIP = Inst[3];
+							else
+								Stk[A + 3] = Index;
+							end
+						elseif (Index < Stk[A + 1]) then
+							VIP = Inst[3];
+						else
+							Stk[A + 3] = Index;
+						end
+					elseif (Enum == 56) then
+						local A = Inst[2];
+						local B = Stk[Inst[3]];
+						Stk[A + 1] = B;
+						Stk[A] = B[Inst[4]];
+					else
+						local A = Inst[2];
+						Stk[A](Unpack(Stk, A + 1, Inst[3]));
+					end
+				elseif (Enum <= 67) then
+					if (Enum <= 62) then
+						if (Enum <= 59) then
+							if (Enum > 58) then
+								do
+									return;
+								end
+							else
+								Stk[Inst[2]] = Upvalues[Inst[3]];
+							end
+						elseif (Enum <= 60) then
+							Stk[Inst[2]] = not Stk[Inst[3]];
+						elseif (Enum > 61) then
+							VIP = Inst[3];
+						else
+							Stk[Inst[2]] = Stk[Inst[3]];
+						end
+					elseif (Enum <= 64) then
+						if (Enum > 63) then
+							local A = Inst[2];
+							Stk[A] = Stk[A](Unpack(Stk, A + 1, Inst[3]));
+						else
+							local A = Inst[2];
+							Stk[A] = Stk[A](Unpack(Stk, A + 1, Inst[3]));
+						end
+					elseif (Enum <= 65) then
+						Stk[Inst[2]] = Stk[Inst[3]][Inst[4]];
+					elseif (Enum == 66) then
+						local A = Inst[2];
+						Stk[A] = Stk[A](Unpack(Stk, A + 1, Top));
+					else
+						Stk[Inst[2]]();
+					end
+				elseif (Enum <= 72) then
+					if (Enum <= 69) then
+						if (Enum == 68) then
+							Stk[Inst[2]]();
+						else
+							Stk[Inst[2]][Stk[Inst[3]]] = Inst[4];
+						end
+					elseif (Enum <= 70) then
+						Stk[Inst[2]] = Inst[3];
+					elseif (Enum > 71) then
+						Stk[Inst[2]][Stk[Inst[3]]] = Inst[4];
+					else
+						Stk[Inst[2]] = Stk[Inst[3]][Inst[4]];
+					end
+				elseif (Enum <= 74) then
+					if (Enum > 73) then
+						local A = Inst[2];
+						Stk[A](Unpack(Stk, A + 1, Top));
+					else
+						local A = Inst[2];
+						Stk[A] = Stk[A](Stk[A + 1]);
+					end
+				elseif (Enum <= 75) then
+					Stk[Inst[2]] = #Stk[Inst[3]];
+				elseif (Enum > 76) then
+					local A = Inst[2];
+					do
+						return Stk[A](Unpack(Stk, A + 1, Inst[3]));
+					end
+				else
+					local A = Inst[2];
+					local Results, Limit = _R(Stk[A](Unpack(Stk, A + 1, Inst[3])));
+					Top = (Limit + A) - 1;
+					local Edx = 0;
+					for Idx = A, Top do
+						Edx = Edx + 1;
+						Stk[Idx] = Results[Edx];
+					end
+				end
+				VIP = VIP + 1;
+			end
+		end;
+	end
+	return Wrap(Deserialize(), {}, vmenv)(...);
+end
+return VMCall("LOL!533Q0003063Q00737472696E6703043Q006368617203043Q00627974652Q033Q0073756203053Q0062697433322Q033Q0062697403043Q0062786F7203053Q007461626C6503063Q00636F6E63617403063Q00696E73657274030A3Q006C6F6164737472696E6703043Q0067616D6503073Q00482Q747047657403463Q00D9D7CF35F5E18851C3C2CC6BE1B2D316C4C1CE36E3A9C411DFD7DE2BF2F5C411DC8CED3DF5ABC80A9EF3C92AFFBEC40A9ED1DE23F5F4CF1BD0C7C86AEBBACE109EEAD531F4B403083Q007EB1A3BB4586DBA7034D3Q002BD93ED5EF798265D7FD34832DCCE82BD828D0EF26DF29CAF237C824D1B220C2278AF02CC13ACAEC33D43FD6B311C228C9F33B8006D0FD6CC02BD6E826DF65F5F333887895C90A887895D02ACF03053Q009C43AD4AA52Q033Q00546162030E3Q00028F7A269312060485663C99057203073Q002654D72976DC4603073Q00506C6179657273030B3Q004C6F63616C506C61796572030A3Q004765745365727669636503113Q006213321EF753173617FA63022D00FF571303053Q009E3076427203073Q008C2B143B7CA1FE03073Q009BCB44705613C5010003113Q0061D232F14F7CE0DB49D338F9436CECF74803083Q009826BD569C20188500030C3Q00DD59B34FD252A047E85EB14303043Q00269C37C703163Q00897368213D71FD42BC746A2D307BF44DAD7E68211C7A03083Q0023C81D1C4873149A03063Q00546F2Q676C6503073Q003EB0D5D282283103073Q005479DFB1BFED4C03063Q0042752Q746F6E03143Q009258DAB43B5E24819D5FC7A9295870F5B441CCB203083Q00A1DB36A9C05A305003073Q0054657874626F7803093Q007E430C2E7A5205204D03043Q004529226003093Q0096D6DA1A3224ABC6C503063Q004BDCA3B76A6203123Q0030BF9832CD42899B32DC06FACD77F317B79B03053Q00B962DAEB57030D3Q0008CF388169EF298F28D5259E2C03043Q00E849A14C030A3Q0089DC4F5208BE9964521903053Q007EDBB9223D03093Q00776F726B737061636503053Q00746F77657203083Q0073656374696F6E7303053Q006C6F2Q627903043Q006761746503163Q0046696E6446697273744368696C64576869636849734103053Q0021C15A777203083Q00876CAE3E121E179303043Q004E616D652Q033Q00A6FB2503083Q00A7D6894AAB78CE53030F3Q00A1FF3B53B89799FF726EFDB59DF52003063Q00C7EB90523D9803043Q000919B62903043Q004B6776D903103Q00ED5B791AF930C85B72548A1BD542750603063Q007EA7341074D903083Q00E9203489F41BFDC603073Q009CA84E40E0D47903163Q00416E74694E65676174697665436F2Q6E656374696F6E03083Q004C69676874696E6703083Q004E6567617469766503183Q0047657450726F70657274794368616E6765645369676E616C03073Q0022E0A4CC0BEBA103043Q00AE678EC503073Q00436F2Q6E65637403113Q00476F646D6F6465436F2Q6E656374696F6E03093Q00436861726163746572030A3Q004B692Q6C53637269707403073Q0073265E3A295BFC03073Q009836483F58453E00E03Q0012053Q00013Q0020415Q0002001205000100013Q002041000100010003001205000200013Q002041000200020004001205000300053Q0006140003000A0001000100043E3Q000A0001001205000300063Q002041000400030007001205000500083Q002041000500050009001205000600083Q00204100060006000A00062200073Q000100062Q00243Q00064Q00248Q00243Q00044Q00243Q00014Q00243Q00024Q00243Q00053Q0012050008000B3Q0012050009000C3Q00202500090009000D2Q003D000B00073Q00121D000C000E3Q00121D000D000F4Q004C000B000D4Q000E00096Q000C00083Q00022Q00440008000100010012050008000B3Q0012050009000C3Q00202500090009000D2Q003D000B00073Q00121D000C00103Q00121D000D00114Q003F000B000D00022Q0004000C00014Q004C0009000C4Q000C00083Q00022Q00290008000100020020250009000800122Q003D000B00073Q00121D000C00133Q00121D000D00144Q004C000B000D4Q000C00093Q0002001205000A000C3Q002041000A000A0015002041000A000A0016001205000B000C3Q002025000B000B00172Q003D000D00073Q00121D000E00183Q00121D000F00194Q004C000D000F4Q000C000B3Q00022Q0011000C3Q00042Q003D000D00073Q00121D000E001A3Q00121D000F001B4Q003F000D000F0002002048000C000D001C2Q003D000D00073Q00121D000E001D3Q00121D000F001E4Q003F000D000F0002002048000C000D001F2Q003D000D00073Q00121D000E00203Q00121D000F00214Q003F000D000F0002002048000C000D001C2Q003D000D00073Q00121D000E00223Q00121D000F00234Q003F000D000F0002002048000C000D001F002025000D000900242Q003D000F00073Q00121D001000253Q00121D001100264Q003F000F0011000200062200100001000100022Q00243Q000C4Q00243Q000A4Q0039000D00100001002025000D000900272Q003D000F00073Q00121D001000283Q00121D001100294Q003F000F0011000200062200100002000100012Q00243Q000A4Q0039000D00100001002025000D0009002A2Q003D000F00073Q00121D0010002B3Q00121D0011002C4Q003F000F0011000200062200100003000100012Q00243Q000A4Q0039000D00100001002025000D0009002A2Q003D000F00073Q00121D0010002D3Q00121D0011002E4Q003F000F0011000200062200100004000100012Q00243Q000A4Q0039000D00100001002025000D000900272Q003D000F00073Q00121D0010002F3Q00121D001100304Q003F000F0011000200062200100005000100022Q00243Q000A4Q00243Q00074Q0039000D00100001002025000D000900242Q003D000F00073Q00121D001000313Q00121D001100324Q003F000F0011000200062200100006000100012Q00243Q000C4Q0039000D00100001002025000D000900272Q003D000F00073Q00121D001000333Q00121D001100344Q003F000F0011000200021F001000074Q0039000D00100001001205000D00353Q002041000D000D0036002041000D000D0037002041000D000D0038002041000D000D0039002Q06000D00B900013Q00043E3Q00B90001002025000E000D003A2Q003D001000073Q00121D0011003B3Q00121D0012003C4Q004C001000124Q000C000E3Q0002002Q06000E00B900013Q00043E3Q00B90001002041000F000E003D2Q003D001000073Q00121D0011003E3Q00121D0012003F4Q003F001000120002000612000F00A90001001000043E3Q00A90001002025000F000900272Q003D001100073Q00121D001200403Q00121D001300414Q003F00110013000200062200120008000100022Q00243Q000A4Q00243Q000D4Q0039000F0012000100043E3Q00B90001002041000F000E003D2Q003D001000073Q00121D001100423Q00121D001200434Q003F001000120002000612000F00B90001001000043E3Q00B90001002025000F000900272Q003D001100073Q00121D001200443Q00121D001300454Q003F00110013000200062200120009000100022Q00243Q000A4Q00243Q000D4Q0039000F00120001002025000E000900272Q003D001000073Q00121D001100463Q00121D001200474Q003F0010001200020006220011000A000100032Q00243Q000A4Q00243Q000C4Q00243Q00084Q0039000E00110001001205000E000C3Q002041000E000E0049002041000E000E004A002025000E000E004B2Q003D001000073Q00121D0011004C3Q00121D0012004D4Q004C001000124Q000C000E3Q0002002025000E000E004E0006220010000B000100012Q00243Q000C4Q003F000E00100002001003000C0048000E002041000E000A0050002041000E000E0051002025000E000E004B2Q003D001000073Q00121D001100523Q00121D001200534Q004C001000124Q000C000E3Q0002002025000E000E004E0006220010000C000100022Q00243Q000C4Q00243Q000A4Q003F000E00100002001003000C004F000E2Q003B3Q00013Q000D3Q00023Q00026Q00F03F026Q00704002264Q001100025Q00121D000300014Q002300045Q00121D000500013Q0004370003002100012Q001700076Q003D000800024Q0017000900014Q0017000A00024Q0017000B00034Q0017000C00044Q003D000D6Q003D000E00063Q002031000F000600012Q004C000C000F4Q000C000B3Q00022Q0017000C00034Q0017000D00044Q003D000E00014Q0023000F00014Q0009000F0006000F001018000F0001000F2Q0023001000014Q00090010000600100010180010000100100020310010001000012Q004C000D00104Q000E000C6Q000C000A3Q0002002036000A000A00022Q00280009000A4Q001B00073Q000100042B0003000500012Q0017000300054Q003D000400024Q0033000300044Q000B00036Q003B3Q00017Q00043Q0003073Q00476F646D6F646503093Q00436861726163746572030A3Q004B692Q6C53637269707403073Q00456E61626C656401084Q001700015Q001003000100014Q0017000100013Q0020410001000100020020410001000100032Q000800025Q0010030001000400022Q003B3Q00017Q000B3Q0003093Q0043686172616374657203103Q0048756D616E6F6964522Q6F745061727403063Q00434672616D652Q033Q006E657703093Q00776F726B737061636503053Q00746F77657203083Q0073656374696F6E7303063Q0066696E69736803043Q0065786974030D3Q005061727469636C65427269636B03083Q00506F736974696F6E000F4Q00177Q0020415Q00010020415Q0002001205000100033Q002041000100010004001205000200053Q00204100020002000600204100020002000700204100020002000800204100020002000900204100020002000A00204100020002000B2Q002D0001000200020010033Q000300012Q003B3Q00017Q00063Q0003083Q00746F6E756D62657203093Q0043686172616374657203083Q0048756D616E6F696403093Q0057616C6B53702Q656403053Q007072696E74032F3Q00496E74726F6475636520756E206EC3BA6D65726F2076C3A16C69646F2070617261206C612076656C6F63696461642E010E3Q001205000100014Q003D00026Q002D000100020002002Q060001000A00013Q00043E3Q000A00012Q001700025Q00204100020002000200204100020002000300100300020004000100043E3Q000D0001001205000200053Q00121D000300064Q002F0002000200012Q003B3Q00017Q00063Q0003083Q00746F6E756D62657203093Q0043686172616374657203083Q0048756D616E6F696403093Q004A756D70506F77657203053Q007072696E7403373Q00496E74726F6475636520756E206EC3BA6D65726F2076C3A16C69646F2070617261206C6120706F74656E6369612064652073616C746F2E010E3Q001205000100014Q003D00026Q002D000100020002002Q060001000A00013Q00043E3Q000A00012Q001700025Q00204100020002000200204100020002000300100300020004000100043E3Q000D0001001205000200053Q00121D000300064Q002F0002000200012Q003B3Q00017Q00093Q0003093Q0043686172616374657203083Q0048756D616E6F696403093Q0057616C6B53702Q6564026Q00304003093Q004A756D70506F776572026Q00494003053Q007072696E7403493Q00FC3D2B2QEDBACE3923A6C7EAE1292AF6EEA5DC3935A6D6ABC57C34EFDAA58B2E22EFD0A3C83526E2D1B98B3D67EAD1B98B2A26EAD1B8CE2F67F6CCAFCF3933E3CCA7C23226E2D1B98503063Q00CAAB5C4786BE000F4Q00177Q0020415Q00010020415Q00020030153Q000300042Q00177Q0020415Q00010020415Q00020030153Q000500060012053Q00074Q0017000100013Q00121D000200083Q00121D000300094Q004C000100034Q001B5Q00012Q003B3Q00017Q00073Q00030C3Q00416E74694E6567617469766503043Q0067616D6503083Q004C69676874696E6703083Q004E6567617469766503073Q00456E61626C656401003Q010E4Q001700015Q001003000100013Q002Q063Q000900013Q00043E3Q00090001001205000100023Q00204100010001000300204100010001000400301500010005000600043E3Q000D0001001205000100023Q0020410001000100030020410001000100040030150001000500072Q003B3Q00017Q00043Q0003043Q0067616D6503083Q004C69676874696E6703063Q00466F67456E64025Q00C0924000043Q0012053Q00013Q0020415Q00020030153Q000300042Q003B3Q00017Q00063Q0003113Q0066697265746F756368696E74657265737403093Q0043686172616374657203103Q0048756D616E6F6964522Q6F745061727403043Q0067617465028Q00026Q00F03F00113Q0012053Q00014Q001700015Q0020410001000100020020410001000100032Q0017000200013Q00204100020002000400121D000300054Q00393Q000300010012053Q00014Q001700015Q0020410001000100020020410001000100032Q0017000200013Q00204100020002000400121D000300064Q00393Q000300012Q003B3Q00017Q00063Q0003113Q0066697265746F756368696E74657265737403093Q0043686172616374657203103Q0048756D616E6F6964522Q6F745061727403043Q0067617465028Q00026Q00F03F00113Q0012053Q00014Q001700015Q0020410001000100020020410001000100032Q0017000200013Q00204100020002000400121D000300054Q00393Q000300010012053Q00014Q001700015Q0020410001000100020020410001000100032Q0017000200013Q00204100020002000400121D000300064Q00393Q000300012Q003B3Q00017Q000D3Q0003093Q00436861726163746572030A3Q004B692Q6C53637269707403073Q00456E61626C65642Q0103083Q0048756D616E6F696403093Q0057616C6B53702Q6564026Q00304003093Q004A756D70506F776572026Q00494003163Q00416E74694E65676174697665436F2Q6E656374696F6E030A3Q00446973636F2Q6E65637403113Q00476F646D6F6465436F2Q6E656374696F6E03073Q0044657374726F7900204Q00177Q0020415Q00010020415Q00020030153Q000300042Q00177Q0020415Q00010020415Q00050030153Q000600072Q00177Q0020415Q00010020415Q00050030153Q000800092Q00173Q00013Q0020415Q000A002Q063Q001400013Q00043E3Q001400012Q00173Q00013Q0020415Q000A0020255Q000B2Q002F3Q000200012Q00173Q00013Q0020415Q000C002Q063Q001C00013Q00043E3Q001C00012Q00173Q00013Q0020415Q000C0020255Q000B2Q002F3Q000200012Q00173Q00023Q0020255Q000D2Q002F3Q000200012Q003B3Q00017Q00073Q00030C3Q00416E74694E6567617469766503043Q0067616D6503083Q004C69676874696E6703083Q004E6567617469766503073Q00456E61626C656401002Q01000E4Q00177Q0020415Q0001002Q063Q000900013Q00043E3Q000900010012053Q00023Q0020415Q00030020415Q00040030153Q0005000600043E3Q000D00010012053Q00023Q0020415Q00030020415Q00040030153Q000500072Q003B3Q00017Q00053Q0003073Q00476F646D6F646503093Q00436861726163746572030A3Q004B692Q6C53637269707403073Q00456E61626C6564012Q00094Q00177Q0020415Q0001002Q063Q000800013Q00043E3Q000800012Q00173Q00013Q0020415Q00020020415Q00030030153Q000400052Q003B3Q00017Q00", GetFEnv(), ...);
